@@ -260,14 +260,17 @@ pub(crate) fn pc_format(format: u32) -> u32 {
 /// order, every 4-bit level exact and every 5-bit level within 1/510.
 /// The title also renders to R9G9B9E5 (67), which no PC GPU does: 16-bit
 /// float RGBA stands in, with at least R9G9B9E5's precision and range.
-/// The title's pipelines and views of such targets name the stand-in too
+/// `VICTORY_E5_TARGETS=r11g11b10` takes R11G11B10_FLOAT (26) instead:
+/// 32 bits a texel as on the console, unsigned and without alpha as
+/// R9G9B9E5 is, with 6/6/5 bits of mantissa against 9. The title's
+/// pipelines and views of such targets name the stand-in too
 /// ([`view_format`], the host view checks).
 /// shortcut: copies between such a target and a texture the title fills
 /// itself in the 16-bit format are skipped ([`stands_in`]); convert them
 /// if a pass turns out to need one.
 pub(crate) fn target_format(format: u32) -> u32 {
-    const STAND_INS: [(u32, u32); 3] = [(86, 28), (115, 28), (67, 10)];
-    let Some(i) = STAND_INS.iter().position(|&(f, _)| f == format) else {
+    let stand_ins: [(u32, u32); 3] = [(86, 28), (115, 28), (67, e5_stand_in())];
+    let Some(i) = stand_ins.iter().position(|&(f, _)| f == format) else {
         return format;
     };
     #[cfg(windows)]
@@ -275,7 +278,7 @@ pub(crate) fn target_format(format: u32) -> u32 {
         use windows::Win32::Graphics::Direct3D12::*;
         static REFUSED: std::sync::OnceLock<[bool; 3]> = std::sync::OnceLock::new();
         let refused = REFUSED.get_or_init(|| {
-            STAND_INS.map(|(f, to)| {
+            stand_ins.map(|(f, to)| {
                 let Some(host) = crate::host::host() else {
                     return false;
                 };
@@ -301,10 +304,23 @@ pub(crate) fn target_format(format: u32) -> u32 {
             })
         });
         if refused[i] {
-            return STAND_INS[i].1;
+            return stand_ins[i].1;
         }
     }
     format
+}
+
+/// The stand-in for R9G9B9E5 targets ([`target_format`]), which the host
+/// cannot render to: `VICTORY_E5_TARGETS=r11g11b10` takes R11G11B10_FLOAT
+/// (26): 32 bits a texel as on the console, unsigned and without alpha as
+/// R9G9B9E5 is, with 6/6/5 bits of mantissa against 9. Unset or anything
+/// else: R16G16B16A16_FLOAT (10), 64 bits a texel.
+pub(crate) fn e5_stand_in() -> u32 {
+    static STAND_IN: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *STAND_IN.get_or_init(|| match std::env::var("VICTORY_E5_TARGETS").ok().as_deref() {
+        Some(v) if v.eq_ignore_ascii_case("r11g11b10") => 26,
+        _ => 10,
+    })
 }
 
 /// Whether the host copy of the title texture `this` is in a stand-in

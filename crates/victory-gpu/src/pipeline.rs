@@ -216,6 +216,7 @@ impl Shader {
             crate::ambient::Role::Resolve => "CS_ScreenProbes_TemporalResolve".to_owned(),
             crate::ambient::Role::Radiance => "CS_CacheScreenSpaceRadiance".to_owned(),
             crate::ambient::Role::Air => "CS_AccumulateLocalLightInscatteringVolume".to_owned(),
+            crate::ambient::Role::Miss => "CS_RayMiss".to_owned(),
         })
     }
 }

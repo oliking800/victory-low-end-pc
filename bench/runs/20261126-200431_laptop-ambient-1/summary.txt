@@ -1,0 +1,12 @@
+tag           laptop-ambient-1
+run           bench\runs\20261126-200431_laptop-ambient-1
+exit          1 (killed=True)
+first world   48 s
+world frames  16 (all 28)
+median        42.75 ms  (23.39 fps)
+p90           59.9 ms
+last frame    2048
+video         5784/6631 MB
+shared        5466 MB
+private       19301 MB (PC free 4120 MB)
+stability     unhandled_exception=0, first_chance_exception=0, device_removed=0, oom_8007000e=0, root_signature_refused=0, no_frame_presented=0, dropped_without_pipeline=1, shader_no_translate=0

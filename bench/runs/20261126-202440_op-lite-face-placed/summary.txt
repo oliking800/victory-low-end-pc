@@ -1,0 +1,12 @@
+tag           op-lite-face-placed
+run           bench\runs\20261126-202440_op-lite-face-placed
+exit          4294967295 (killed=False)
+first world   118 s
+world frames  22 (all 22)
+median        41.05 ms  (24.36 fps)
+p90           152.3 ms
+last frame    2048
+video         5940/6799 MB
+shared        5222 MB
+private       18605 MB (PC free 4667 MB)
+stability     unhandled_exception=0, first_chance_exception=0, device_removed=0, oom_8007000e=0, root_signature_refused=0, no_frame_presented=0, dropped_without_pipeline=1, shader_no_translate=0

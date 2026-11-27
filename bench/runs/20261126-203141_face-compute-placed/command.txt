@@ -1,0 +1,1 @@
+D:\victory-laptop-8gb\target\diag\victory.exe run D:\my_xbox_game_dump\game_scarlett_master.exe --console series-s --execute

@@ -1,0 +1,12 @@
+tag           native-720p-head
+run           bench\runs\20261126-201835_native-720p-head
+exit          0 (killed=False)
+first world   120 s
+world frames  1 (all 27)
+median        48.0 ms  (20.83 fps)
+p90           48.0 ms
+last frame    2048
+video         6175/6901 MB
+shared        4751 MB
+private       18782 MB (PC free 4973 MB)
+stability     unhandled_exception=0, first_chance_exception=0, device_removed=0, oom_8007000e=0, root_signature_refused=0, no_frame_presented=0, dropped_without_pipeline=1, shader_no_translate=3

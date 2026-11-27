@@ -78,6 +78,31 @@ thread_local! {
     /// milliseconds and the bytes that run may take, in place of the
     /// pass's own per frame.
     static PASS_BUDGET: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
+    /// While a stage's tables are made: the table places it moves 16-bit
+    /// halves through (`HostShader::half_views`).
+    static HALF_PLACES: std::cell::RefCell<Vec<(u8, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Since the start: host slots of tables made with the unsigned twin of a
+/// 16-bit float or signed buffer view (`descriptor::host::half_view`).
+pub(crate) static HALF_VIEWS_SHOWN: AtomicU64 = AtomicU64::new(0);
+
+/// Logs, once per shader (at most 256), that a stage moves 16-bit halves as
+/// unsigned integers through table places.
+fn note_half_views(pipeline: &str, shader: &str, places: &[(u8, u32)]) {
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = seen.get_or_insert_with(Default::default);
+    if seen.len() >= 256 || !seen.insert(shader.to_owned()) {
+        return;
+    }
+    tracing::info!(
+        pipeline,
+        shader,
+        places = ?places,
+        "a shader moves 16-bit halves as unsigned integers through these table places (root parameter, dword): \
+         16-bit float views there are shown as their unsigned twin (VICTORY_HALF_VIEWS=0: off, needs a re-warmed shader cache)"
+    );
 }
 
 /// The milliseconds of every frame the pass that uploads textures picked
@@ -1546,6 +1571,14 @@ impl State {
             TABLE_WRITES.set(t.host.written_tables.as_ref().map(|w| (w.as_ptr(), w.len())));
             if t.stores && crate::picked::on() && crate::picked::picks(&stage.shader, &t.picks) {
                 crate::picked::runs_in(list);
+            }
+            // (fxceless #927) The table places this stage moves 16-bit halves through.
+            HALF_PLACES.with_borrow_mut(|h| {
+                h.clear();
+                h.extend_from_slice(&t.host.half_views);
+            });
+            if !t.host.half_views.is_empty() {
+                note_half_views(&p.name, &stage.shader.hash, &t.host.half_views);
             }
             let made = self.tables(list, &t.used, &t.host.root_indexed_views, compute);
             TABLE_WRITES.set(None);
@@ -3251,6 +3284,27 @@ impl State {
                 fresh.push(u.slot);
             }
         }
+        // (fxceless #927) A table with a 16-bit float or signed buffer view at a place the
+        // shader moves halves through is made afresh too, with that view in the unsigned
+        // format of the same layout (`descriptor::host::half_view`); the title's own slot
+        // keeps the title's format for the shaders that read it as floats.
+        let half: Vec<(u8, u32)> = HALF_PLACES.with_borrow(|h| h.clone());
+        for &(slot, at) in &half {
+            let Some(&Root::Table(table)) = self.roots_ref(compute).get(usize::from(slot)) else {
+                continue;
+            };
+            let Some(view) = crate::descriptor::view(table + u64::from(at) * 4) else {
+                continue;
+            };
+            if crate::descriptor::host::half_view(&view).is_some() {
+                fresh.push(slot);
+            } else if let Some(format) = crate::descriptor::host::half_inexact(&view) {
+                once!(
+                    format,
+                    "a shader moves a buffer's 16-bit channels as integers through a view whose values the console converts: they are read and written unconverted"
+                );
+            }
+        }
         fresh.sort_unstable();
         for u in used.iter().filter(tables) {
             if !fresh.contains(&u.slot) {
@@ -3291,6 +3345,9 @@ impl State {
                     index.byte_offset.wrapping_add(constant << index.shift) / 32
                 })
                 .collect();
+            // (fxceless #927) The places the shader moves halves through are made too, and
+            // the table reaches them (they may lie past the range starts the entries give).
+            selected.extend(half.iter().filter(|&&(s, _)| s == slot).map(|&(_, at)| at / 8));
             selected.sort_unstable();
             selected.dedup();
             let n = entries()
@@ -3453,7 +3510,19 @@ impl State {
                         host.constant_at(index, &buffer, gpu, size);
                     }
                     Some(view) => {
-                        host.make_at(index, &view);
+                        // (fxceless #927) The unsigned twin where the shader moves halves.
+                        let twin = if half.contains(&(slot, k * 8)) {
+                            crate::descriptor::host::half_view(&view)
+                        } else {
+                            None
+                        };
+                        match twin {
+                            Some(twin) => {
+                                HALF_VIEWS_SHOWN.fetch_add(1, Ordering::Relaxed);
+                                host.make_at(index, &twin);
+                            }
+                            None => host.make_at(index, &view),
+                        }
                         let kind = used.map(|u| u.kind).or_else(|| {
                             selected.binary_search(&k).ok().and_then(|_| view_kind(&view))
                         });

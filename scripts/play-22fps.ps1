@@ -8,7 +8,11 @@
 # Use -More @{ VICTORY_AMBIENT='1.0' } for one-setting experiments.
 param(
     [Parameter(Mandatory)][string]$Game,
-    [hashtable]$More = @{}
+    [hashtable]$More = @{},
+    # With this, the game's own output and its tracing go to the file instead of
+    # the console. The tracing is on stderr; a PowerShell pipeline would turn
+    # every line of it into an error record, so the run starts without one.
+    [string]$LogFile
 )
 $ErrorActionPreference = 'Stop'
 
@@ -44,7 +48,7 @@ $settings = [ordered]@{
     VICTORY_RT_SKIP_ACTIVATE     = '1'
     VICTORY_RT_SKIP_RESOLVE      = '1'
     VICTORY_MEMORY_MAP           = '0'
-    VICTORY_PIPELINE_BOOK        = '0'
+    VICTORY_PIPELINE_BOOK        = '1'
     VICTORY_CARD_ACCOUNTING      = '0'
     VICTORY_D3D12_DRED           = '0'
     VICTORY_PANEL                = '0'
@@ -52,6 +56,9 @@ $settings = [ordered]@{
     VICTORY_UNDER_WIDE           = '0'
     VICTORY_WIDE_BACK            = '1'
     VICTORY_TEXTURE_NO_WAIT      = '1'
+    VICTORY_HALF_VIEWS           = '1'
+    VICTORY_NAN_GUARD            = '0'
+    VICTORY_PS_QUAD_READS        = '0'
     VICTORY_CLAMP_WAITS          = '0'
     VICTORY_LAND_ECHO            = '0'
     VICTORY_DYNAMIC_SLOTS        = '524288'
@@ -77,8 +84,26 @@ Get-ChildItem Env:VICTORY_* -ErrorAction SilentlyContinue |
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
 
 $Game = (Resolve-Path -LiteralPath $Game).Path
+if ($LogFile) {
+    if (-not [IO.Path]::IsPathRooted($LogFile)) { $LogFile = Join-Path (Get-Location).Path $LogFile }
+    $LogFile = [IO.Path]::GetFullPath($LogFile)
+    New-Item -ItemType Directory -Force -Path (Split-Path $LogFile -Parent) | Out-Null
+}
 Push-Location (Join-Path $PSScriptRoot '..')
 try {
+    if ($LogFile) {
+        $out = "$LogFile.out"
+        $code = 0
+        $p = Start-Process -FilePath $victory -ArgumentList "run `"$Game`" --execute --console series-s" `
+            -WorkingDirectory (Get-Location).Path -RedirectStandardOutput $out -RedirectStandardError $LogFile `
+            -NoNewWindow -Wait -PassThru
+        if ($p) { $code = $p.ExitCode }
+        if (Test-Path -LiteralPath $out) {
+            Get-Content -LiteralPath $out | Add-Content -LiteralPath $LogFile
+            Remove-Item -LiteralPath $out -Force
+        }
+        return $code
+    }
     & $victory run $Game --execute --console series-s
 } finally {
     Pop-Location

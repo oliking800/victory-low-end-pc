@@ -1,0 +1,12 @@
+tag           face-fix-v1
+run           bench\runs\20261126-201436_face-fix-v1
+exit          1 (killed=True)
+first world   75 s
+world frames  16 (all 29)
+median        52.5 ms  (19.05 fps)
+p90           152.8 ms
+last frame    2048
+video         5924/6797 MB
+shared        7013 MB
+private       21219 MB (PC free 929 MB)
+stability     unhandled_exception=0, first_chance_exception=0, device_removed=0, oom_8007000e=23, root_signature_refused=0, no_frame_presented=0, dropped_without_pipeline=1, shader_no_translate=0

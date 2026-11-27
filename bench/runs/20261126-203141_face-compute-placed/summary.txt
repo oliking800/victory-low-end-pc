@@ -1,0 +1,12 @@
+tag           face-compute-placed
+run           bench\runs\20261126-203141_face-compute-placed
+exit          4294967295 (killed=True)
+first world   153 s
+world frames  1 (all 33)
+median        171.2 ms  (5.84 fps)
+p90           171.2 ms
+last frame    4096
+video         6201/6937 MB
+shared        7131 MB
+private       21262 MB (PC free 1947 MB)
+stability     unhandled_exception=0, first_chance_exception=0, device_removed=0, oom_8007000e=0, root_signature_refused=0, no_frame_presented=0, dropped_without_pipeline=1, shader_no_translate=0

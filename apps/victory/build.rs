@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 fn main() {
+    victory_agility_copy_d3d12_core();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo::rustc-check-cfg=cfg(agility)");
     // OUT_DIR is <target>/<profile>/build/<package>-<hash>/out; the exe and
@@ -30,3 +31,65 @@ fn main() {
         println!("cargo:warning=D3D12\\D3D12Core.dll found: Agility SDK exports on (Windows 10)");
     }
 }
+
+
+// --- victory-agility-patch (auto-copy) -------------------------------------
+// A build.rs that already exports the Agility SDK symbols still needs the
+// DLL beside the exe. Find it in the tree and copy it into this profile's
+// D3D12\ folder before the existing core.exists() check runs.
+fn victory_agility_copy_d3d12_core() {
+    let out = std::path::PathBuf::from(
+        std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"),
+    );
+    let profile = match out.ancestors().nth(3) {
+        Some(profile) => profile,
+        None => return,
+    };
+    let dir = profile.join("D3D12");
+    let core = dir.join("D3D12Core.dll");
+    if core.is_file() {
+        return;
+    }
+    if let Some(src) = victory_agility_find_d3d12_core(profile) {
+        println!("cargo:rerun-if-changed={}", src.display());
+        if std::fs::create_dir_all(&dir).is_ok() && std::fs::copy(&src, &core).is_ok() {
+            println!(
+                "cargo:warning=D3D12Core.dll copied from {} (Windows 10 Agility SDK)",
+                src.display()
+            );
+        }
+    }
+}
+
+fn victory_agility_find_d3d12_core(profile: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("VICTORY_D3D12_CORE") {
+        let p = std::path::PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let mut roots = Vec::new();
+    if let Some(m) = std::env::var_os("CARGO_MANIFEST_DIR") {
+        roots.push(std::path::PathBuf::from(m));
+    }
+    roots.push(profile.to_path_buf());
+    for root in &roots {
+        for at in root.ancestors() {
+            for rel in [
+                "D3D12/D3D12Core.dll",
+                "D3D12Core.dll",
+                "cool_fox/D3D12/D3D12Core.dll",
+                "deps/D3D12Core.dll",
+                ".d3d12/D3D12Core.dll",
+            ] {
+                let p = at.join(rel);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+// --- end victory-agility-patch (auto-copy) ---------------------------------
+

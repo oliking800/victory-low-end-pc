@@ -77,6 +77,9 @@ fn build() -> [u8; 32] {
             "VICTORY_BVH_BOUNDS",
             "VICTORY_BVH_MISS",
             "VICTORY_MESH_LAUNCH",
+            "VICTORY_HALF_VIEWS",
+            "VICTORY_NAN_GUARD",
+            "VICTORY_PS_QUAD_READS",
         ] {
             bytes.extend_from_slice(name.as_bytes());
             bytes.push(b'=');
@@ -283,6 +286,12 @@ fn encode(s: &HostShader) -> Vec<u8> {
             }
         }
     }
+    // (fxceless #927) The table places the shader moves halves through.
+    word(&mut out, s.half_views.len() as u32);
+    for &(slot, dword) in &s.half_views {
+        word(&mut out, u32::from(slot));
+        word(&mut out, dword);
+    }
     out
 }
 
@@ -361,6 +370,11 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
             Some(entries)
         }
     };
+    let n = r.word()? as usize;
+    let mut half_views = Vec::with_capacity(n.min(256));
+    for _ in 0..n {
+        half_views.push((u8::try_from(r.word()?).ok()?, r.word()?));
+    }
     r.0.is_empty().then_some(HostShader {
         stage,
         dxil,
@@ -372,6 +386,7 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
         root_uavs,
         written_tables,
         root_indexed_views,
+        half_views,
     })
 }
 
@@ -407,6 +422,7 @@ mod tests {
                 byte_offset: 32,
                 shift: 5,
             }],
+            half_views: vec![(0, 8), (4, 0)],
         }
     }
 

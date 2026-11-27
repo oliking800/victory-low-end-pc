@@ -360,6 +360,17 @@ pub struct HostShader {
     pub written_tables: Option<Vec<(u8, u32)>>,
     /// Heap descriptors that can be selected from root state at bind time.
     pub root_indexed_views: Vec<crate::resource::RootIndexedView>,
+    /// (fxceless #927 via trustno1 77e13a9) Table descriptors (root parameter, dword
+    /// offset in the table) through which the shader moves sixteen bits a channel as
+    /// they are: a d16 typed access, or a format load of whole dwords whose every use
+    /// reads one half as a half float (the head program's reads of the face network's
+    /// output), where every access through that place does. On the console the 16 bits
+    /// move as they are through a 16-bit float view and an integer one alike; the DXIL
+    /// moves them as unsigned integers, and the host shows the shader a 16-bit float or
+    /// signed buffer view at these places as the unsigned format of the same layout
+    /// (`descriptor::host::half_view`). Read as floats on NVIDIA they came back as zeros:
+    /// frozen faces. `VICTORY_HALF_VIEWS=0`: none, as before.
+    pub half_views: Vec<(u8, u32)>,
 }
 
 impl HostShader {
@@ -803,6 +814,7 @@ fn emit_program(
         root_uavs: l.root_uavs,
         written_tables: l.written_tables.clone(),
         root_indexed_views: res.root_indexed_views.clone(),
+        half_views: l.half_views,
     };
     Ok((shader, wave_size))
 }
@@ -1586,6 +1598,7 @@ mod tests {
             root_uavs: Vec::new(),
             written_tables: None,
             root_indexed_views: Vec::new(),
+            half_views: Vec::new(),
         };
         let file = |var: &str, stage| {
             std::env::var(var).ok().map(|p| super::HostShader {
@@ -1599,6 +1612,7 @@ mod tests {
                 root_uavs: Vec::new(),
                 written_tables: None,
                 root_indexed_views: Vec::new(),
+                half_views: Vec::new(),
             })
         };
         let ps = file("VICTORY_REF_PS", crate::HwStage::Ps).unwrap_or(ps);
@@ -2363,6 +2377,7 @@ mod tests {
                 root_uavs: l.root_uavs,
                 written_tables: l.written_tables.clone(),
                 root_indexed_views: Vec::new(),
+                half_views: Vec::new(),
             };
             let (root, pso) = host.compute_pipeline(&cs).unwrap();
             let inputs: Vec<u32> = [

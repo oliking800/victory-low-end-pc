@@ -143,6 +143,7 @@ fn lowered_counted(
         root_uavs: lowered.root_uavs,
         written_tables: None,
         root_indexed_views: res.root_indexed_views,
+        half_views: Vec::new(),
     })
 }
 

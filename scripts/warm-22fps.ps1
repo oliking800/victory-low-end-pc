@@ -4,7 +4,9 @@ param(
     [int]$Jobs = 4
 )
 $ErrorActionPreference = 'Stop'
-# Same translator switches as play-22fps.ps1, so the warm entries match the game's.
+# Same translator switches and target formats as play-22fps.ps1, so the warm
+# entries match the game's pipelines.
+$env:VICTORY_E5_TARGETS = 'r11g11b10'
 $env:VICTORY_HALF_VIEWS = '1'
 $env:VICTORY_NAN_GUARD = '0'
 $env:VICTORY_PS_QUAD_READS = '0'

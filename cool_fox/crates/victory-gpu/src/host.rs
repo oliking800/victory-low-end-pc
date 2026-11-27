@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{E_OUTOFMEMORY, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -369,8 +369,9 @@ pub(crate) fn keep_freed() -> bool {
 
 /// Effective idle timeout (in milliseconds) for system-RAM caches (staging
 /// buffers, loose shadows, and the mapped pipeline library), scaled down
-/// when free physical RAM is low. Never returns less than 2,000 ms.
-/// With plenty of it five minutes ([`keep_freed`]).
+/// when free physical RAM is low, and again when OS commit headroom is low
+/// so RAM caches shrink before commit exhaustion. Never returns less than
+/// 2,000 ms. With plenty of it five minutes ([`keep_freed`]).
 pub(crate) fn ram_idle_ms(avail_phys: Option<u64>) -> u64 {
     let effective = match (avail_phys, crate::residency::headroom()) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -378,6 +379,11 @@ pub(crate) fn ram_idle_ms(avail_phys: Option<u64>) -> u64 {
     };
     ram_idle_for(effective, keep_freed() && !crate::residency::limited_host_ram())
 }
+
+/// Threshold below which commit headroom is treated as scarce: RAM caches
+/// use their shortest idle timeout so they shrink early rather than hold
+/// idle system memory while commit headroom is exhausted.
+const COMMIT_SCARCE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 fn ram_idle_for(avail_phys: Option<u64>, keep: bool) -> u64 {
     const GIB: u64 = 1024 * 1024 * 1024;
@@ -391,7 +397,11 @@ fn ram_idle_for(avail_phys: Option<u64>, keep: bool) -> u64 {
     let Some(avail) = avail_phys else {
         return NORMAL_MS;
     };
-    if avail < 2 * GIB {
+    // Commit headroom scarce: treat even abundant physical RAM as limited so
+    // idle caches give memory back early.
+    let commit_scarc = crate::residency::headroom()
+        .is_some_and(|h| h < COMMIT_SCARCE_BYTES);
+    if avail < 2 * GIB || commit_scarc {
         HIGH_MS
     } else if avail < 4 * GIB {
         MODERATE_MS
@@ -443,6 +453,12 @@ fn sweep() {
     crate::residency::refresh();
     if crate::residency::pressured() {
         trim_spare_chunks();
+        // Release idle preludes (~5 MB of commit each) so the commit they hold
+        // is available for the host lists that must close.
+        let mut idle = PRELUDE_IDLE.lock().unwrap_or_else(|e| e.into_inner());
+        let released = std::mem::take(&mut *idle);
+        drop(idle);
+        drop(released);
     }
     crate::pool::room(host().and_then(|h| h.video_memory()));
     crate::pipeline::trim_library();
@@ -767,6 +783,94 @@ pub(crate) static ALIVE: [std::sync::atomic::AtomicU64; 8] = [const { std::sync:
 /// cost 0.68 MB of private memory in run 69: 431 MB for the 632 the title
 /// makes at its start).
 pub(crate) static LISTS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// Host preludes that have been used and are free to reuse: each is an
+/// allocator and a closed command list, about 5 MB of commit memory. Lists
+/// that never need texture transitions never have one, but every list that
+/// did grew its own prelude and never let go — the prelude count climbed
+/// 126→876 (~4.4 GB of commit) until Windows commit headroom was gone and
+/// the run died with 0x8007000E. Used preludes go back here instead of being
+/// released, so a later list that needs transitions reuses one.
+static PRELUDE_IDLE: std::sync::Mutex<Vec<Prelude>> = std::sync::Mutex::new(Vec::new());
+
+/// The most idle preludes kept. `VICTORY_MAX_PRELUDES` overrides; 0 means
+/// none are kept (each is released right after its list is reset).
+const PRELUDE_IDLE_MOST: usize = 64;
+
+fn max_preludes() -> usize {
+    // Under commit or physical memory pressure, no preludes are kept idle:
+    // each is ~5 MB of commit, and keeping them starves the lists that need
+    // to close. A prelude is released straight away instead of pooled.
+    if crate::residency::pressured() {
+        return 0;
+    }
+    static ON: OnceLock<usize> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("VICTORY_MAX_PRELUDES")
+            .and_then(|v| v.to_string_lossy().parse().ok())
+            .unwrap_or(PRELUDE_IDLE_MOST)
+    })
+}
+
+/// A slot holding a host list's prelude: an allocator and a closed command
+/// list (~5 MB of commit memory each). When the slot is dropped, the prelude
+/// goes back to [`PRELUDE_IDLE`] instead of being released, so a later list
+/// that needs texture transitions can reuse it. [`release_prelude`] returns
+/// it early when the list is pooled, so preludes do not accumulate one per
+/// idle host list (the pool keeps up to 512). Without this, every list that
+/// ever needed transitions grew its own prelude and never let go — the
+/// prelude count climbed 126→876 (~4.4 GB of commit) until Windows commit
+/// headroom was gone and the run died with 0x8007000E.
+struct PreludeSlot {
+    inner: OnceLock<Option<Prelude>>,
+}
+
+impl PreludeSlot {
+    fn new() -> Self {
+        Self { inner: OnceLock::new() }
+    }
+
+    fn set(&self, prelude: Option<Prelude>) -> Result<(), Option<Prelude>> {
+        self.inner.set(prelude)
+    }
+
+    fn get_or_init<F>(&self, f: F) -> Option<&Prelude>
+    where
+        F: FnOnce() -> Option<Prelude>,
+    {
+        self.inner.get_or_init(|| f()).as_ref()
+    }
+
+    /// Takes the prelude out of the slot, leaving it empty so a later use
+    /// lazily makes (or reuses from [`PRELUDE_IDLE`]) a new one.
+    fn take(&mut self) -> Option<Prelude> {
+        let old = std::mem::replace(&mut self.inner, OnceLock::new());
+        old.into_inner().flatten()
+    }
+
+    /// Returns the prelude to [`PRELUDE_IDLE`] if there is room, clearing
+    /// the slot so the list can be pooled without holding ~5 MB of commit.
+    /// Called when a host list goes back to the pool.
+    pub(crate) fn release_prelude(&mut self) {
+        if let Some(prelude) = self.take() {
+            let mut idle = PRELUDE_IDLE.lock().unwrap_or_else(|e| e.into_inner());
+            if idle.len() < max_preludes() {
+                idle.push(prelude);
+            }
+        }
+    }
+}
+
+impl Drop for PreludeSlot {
+    fn drop(&mut self) {
+        if let Some(prelude) = self.take() {
+            let mut idle = PRELUDE_IDLE.lock().unwrap_or_else(|e| e.into_inner());
+            if idle.len() < max_preludes() {
+                idle.push(prelude);
+            }
+        }
+    }
+}
 
 /// The process's private bytes (diagnostics: around the making of lists).
 #[cfg(feature = "diagnostics")]
@@ -1171,8 +1275,10 @@ pub(crate) struct HostList {
     /// twin ([`TwinUse`]).
     twins: Mutex<std::collections::HashMap<usize, TwinUse>>,
     /// The list that runs those transitions just before this one, made
-    /// when the list first has such transitions ([`lazy_prelude`]).
-    prelude: OnceLock<Option<Prelude>>,
+    /// when the list first has such transitions ([`lazy_prelude`]). Held in
+    /// a [`PreludeSlot`] so that when the list is dropped its prelude goes
+    /// back to [`PRELUDE_IDLE`] instead of being released.
+    prelude: PreludeSlot,
     /// The pipelines the list binds, for reports of slow submissions.
     pipelines: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// What its indirect executions ran, for the report of a removed device.
@@ -4029,6 +4135,11 @@ impl Host {
 
     /// An allocator and a closed list for a prelude.
     fn make_prelude(&self) -> Option<Prelude> {
+        // Reuse an idle prelude first: one allocator + one list (~5 MB of
+        // commit) saved from being made again.
+        if let Some(prelude) = PRELUDE_IDLE.lock().unwrap_or_else(|e| e.into_inner()).pop() {
+            return Some(prelude);
+        }
         // SAFETY: plain object creation.
         let made: windows::core::Result<Prelude> = unsafe {
             (|| {
@@ -4063,7 +4174,7 @@ impl Host {
                 &allocator,
                 None,
             )?;
-            let prelude = OnceLock::new();
+            let prelude = PreludeSlot::new();
             if !lazy_prelude() {
                 let _ = prelude.set(self.make_prelude());
             }
@@ -6282,10 +6393,23 @@ impl HostList {
             }
         }
         // SAFETY: our list.
-        if let Err(e) = unsafe { self.list.Close() } {
-            fail(format_args!(
+        match unsafe { self.list.Close() } {
+            Ok(()) => {}
+            Err(e) if e.code() == windows::Win32::Foundation::E_OUTOFMEMORY => {
+                // Out of memory while closing: free idle preludes and host
+                // lists (they hold ~5+ MB each) and retry once. The first
+                // close may have raced with an allocation the pressure
+                // release now frees.
+                sweep();
+                if let Err(e) = unsafe { self.list.Close() } {
+                    fail(format_args!(
+                        "a host command list did not close ({e}): a command recorded into it was invalid"
+                    ));
+                }
+            }
+            Err(e) => fail(format_args!(
                 "a host command list did not close ({e}): a command recorded into it was invalid"
-            ));
+            )),
         }
     }
 
@@ -6348,6 +6472,13 @@ impl HostList {
         }
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::ResetNs, started.elapsed().as_nanos() as u64);
+    }
+
+    /// Returns the prelude to [`PRELUDE_IDLE`] so the list can be pooled
+    /// without holding ~5 MB of commit. Called when a host list goes back to
+    /// the pool (`crate::list::recycle`).
+    pub(crate) fn release_prelude(&mut self) {
+        self.prelude.release_prelude();
     }
 
     /// Something changed in this list that bringing a draw's textures and
@@ -6699,7 +6830,6 @@ impl HostList {
         let Some((allocator, list)) = self
             .prelude
             .get_or_init(|| host().and_then(|h| h.make_prelude()))
-            .as_ref()
         else {
             fail(format_args!("no host list for a state prelude"));
         };
@@ -8828,15 +8958,16 @@ impl Meter {
                     crate::descriptor::host::STALE[4].load(Ordering::Relaxed)
                 );
             }
-            if crate::resource::held_only() {
+            if crate::resource::held_only() || crate::resource::texture_mip_drop() > 0 {
                 let [copies, bytes, grown, whole] = [0, 1, 2, 3].map(|i| crate::resource::HELD[i].load(Ordering::Relaxed));
                 let [flipped, missed] = [0, 1].map(|i| crate::descriptor::host::FLIPPED[i].load(Ordering::Relaxed));
                 tracing::info!(
-                    "textures from the first level viewed (VICTORY_HELD_LEVELS=0: whole), since the start: {copies} host copies of the \
+                    "textures from the first level viewed (VICTORY_HELD_LEVELS=0: whole; VICTORY_TEXTURE_MIP_DROP={}), since the start: {copies} host copies of the \
                      levels viewed alone ({} MB on the card, {} MB of title memory whole), {grown} replaced by one with more levels, \
                      {flipped} slots made from their new view after its upload had run ({missed} written again first); {} uploads left \
                      out as the host copy held those bytes (VICTORY_TEXTURE_SAME=0: made); {} MB of texture blocks free; \
                      {} looks for textures to let go, {:.2} ms each, the longest {:.1}",
+                    crate::resource::texture_mip_drop(),
                     bytes >> 20,
                     whole >> 20,
                     crate::draw::HEAP_TEXTURES_SAME.load(Ordering::Relaxed),
@@ -8944,7 +9075,7 @@ impl Meter {
             self.caption = Some(buffer);
         }
         let Some(caption) = &self.caption else { return };
-        let text = format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
+        let text = format!(" | wasdekeys build | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
         let mut text: Vec<u16> = caption.iter().copied().chain(text.encode_utf16()).collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,

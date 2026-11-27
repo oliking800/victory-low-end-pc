@@ -2225,4 +2225,113 @@ mod tests {
         // The programs are of the wasteful kind: the passes find work.
         assert!(removed > 4000, "{removed} instructions removed");
     }
+
+    /// As written: the most branches back one block makes, and the most
+    /// blocks that branch back to one header.
+    fn back_edges(m: &Module) -> (usize, usize) {
+        let (layout, fold) = m.layout();
+        let mut pos = vec![usize::MAX; m.blocks.len()];
+        for (n, &b) in layout.iter().enumerate() {
+            pos[b] = n;
+        }
+        let mut into = vec![0; m.blocks.len()];
+        let mut most = 0;
+        for &b in &layout {
+            let mut to: Vec<usize> = successors(m.blocks[b].term)
+                .iter()
+                .map(|&t| fold[t].map_or(t, |(_, h)| h))
+                .filter(|&t| pos[t] <= pos[b])
+                .collect();
+            to.dedup();
+            most = most.max(to.len());
+            to.iter().for_each(|&h| into[h] += 1);
+        }
+        (most, into.into_iter().max().unwrap_or(0))
+    }
+
+    #[test]
+    fn every_loop_has_one_branch_back() {
+        let mut k = kit();
+        let i32t = k.m.int(32);
+        let fty = k.m.func_ty(i32t, vec![i32t, i32t]);
+        let input =
+            k.m.function("dx.op.loadInput.i32", fty, Some(Attr::ReadNone), false);
+        let Kit {
+            mut m, b, writes, ..
+        } = k;
+        let [h1, h2, exit, h3, odd, even, e3, h4, h5, c1, c2, e4] =
+            std::array::from_fn(|_| m.new_block());
+        let (zero, one, two, three) = (m.i32(0), m.i32(1), m.i32(2), m.i32(3));
+        let x = m.call(b, input, vec![zero, one]);
+        m.terminate(b, Term::Br(h1));
+        // An inner loop whose latch is the outer loop's latch too.
+        let i = m.phi(h1, i32t);
+        let i1 = m.bin(h1, Bin::Add, i, one);
+        m.call(h1, writes, vec![i1, x]);
+        let out = m.cmp(h1, pred::IUGE, i1, three);
+        m.terminate(h1, Term::CondBr(out, exit, h2));
+        let j = m.phi(h2, i32t);
+        let j1 = m.bin(h2, Bin::Add, j, one);
+        m.call(h2, writes, vec![j1, i]);
+        let more = m.cmp(h2, pred::IULT, j1, two);
+        m.terminate(h2, Term::CondBr(more, h2, h1));
+        m.set_phi(i, vec![(zero, b), (i1, h2)]);
+        m.set_phi(j, vec![(zero, h1), (j1, h2)]);
+        m.terminate(exit, Term::Br(h3));
+        // A loop with two latches, which carry different values round.
+        let kk = m.phi(h3, i32t);
+        let k1 = m.bin(h3, Bin::Add, kk, one);
+        let low = m.bin(h3, Bin::And, k1, one);
+        let is_odd = m.cmp(h3, pred::NE, low, zero);
+        m.terminate(h3, Term::CondBr(is_odd, odd, even));
+        let ka = m.bin(odd, Bin::Add, k1, two);
+        let seven = m.i32(7);
+        let again = m.cmp(odd, pred::IULT, ka, seven);
+        m.terminate(odd, Term::CondBr(again, h3, e3));
+        let kb = m.bin(even, Bin::Mul, k1, three);
+        m.call(even, writes, vec![kb, kk]);
+        let thirty = m.i32(30);
+        let again = m.cmp(even, pred::IULT, kb, thirty);
+        m.terminate(even, Term::CondBr(again, h3, e3));
+        m.set_phi(kk, vec![(zero, exit), (ka, odd), (kb, even)]);
+        let last = m.phi(e3, i32t);
+        m.set_phi(last, vec![(ka, odd), (kb, even)]);
+        m.call(e3, writes, vec![last, x]);
+        m.terminate(e3, Term::Br(h4));
+        // One block above the empty latches of an inner and an outer loop.
+        let l = m.phi(h4, i32t);
+        let l1 = m.bin(h4, Bin::Add, l, one);
+        let done = m.cmp(h4, pred::IUGE, l1, three);
+        m.terminate(h4, Term::CondBr(done, e4, h5));
+        let q = m.phi(h5, i32t);
+        let q1 = m.bin(h5, Bin::Add, q, one);
+        m.call(h5, writes, vec![q1, l1]);
+        let inner = m.cmp(h5, pred::IULT, q1, two);
+        m.terminate(h5, Term::CondBr(inner, c1, c2));
+        m.terminate(c1, Term::Br(h5));
+        m.terminate(c2, Term::Br(h4));
+        m.set_phi(l, vec![(zero, e3), (l1, c2)]);
+        m.set_phi(q, vec![(zero, h4), (q1, c1)]);
+        m.terminate(e4, Term::Ret);
+
+        let inputs: Vec<Vec<u32>> = vec![vec![0; 7], (0..7).collect(), vec![u32::MAX; 7]];
+        let before: Vec<_> = inputs.iter().map(|i| run(&m, i)).collect();
+        assert!(
+            before
+                .iter()
+                .all(|t| t.last().is_some_and(|e| e.0 == "ret"))
+        );
+        assert_eq!(back_edges(&m), (2, 2), "both shapes, as made");
+        // Of the two empty latches below one block, the inner loop's is
+        // folded into it, the outer loop's stays.
+        let (_, fold) = m.layout();
+        assert_eq!((fold[c1], fold[c2]), (Some((h5, h5)), None));
+
+        m.one_back_edge_each();
+        assert_eq!(back_edges(&m), (1, 1));
+        for (i, want) in inputs.iter().zip(&before) {
+            assert_eq!(&run(&m, i), want);
+        }
+        m.write();
+    }
 }

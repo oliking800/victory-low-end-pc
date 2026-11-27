@@ -517,6 +517,202 @@ impl Module {
         self.named.push((name.into(), nodes));
     }
 
+    /// The blocks reached from the entry, in reverse postorder: every block
+    /// after its forward predecessors.
+    fn reverse_postorder(&self) -> Vec<usize> {
+        let succs = |b: usize| successors(self.blocks[b].term);
+        let mut seen = vec![false; self.blocks.len()];
+        let mut post = Vec::new();
+        let mut stack = vec![(0usize, 0usize)];
+        seen[0] = true;
+        while let Some(top) = stack.last_mut() {
+            let (b, k) = *top;
+            top.1 += 1;
+            match succs(b).get(k) {
+                Some(&s) if !seen[s] => {
+                    seen[s] = true;
+                    stack.push((s, 0));
+                }
+                Some(_) => {}
+                None => {
+                    post.push(b);
+                    stack.pop();
+                }
+            }
+        }
+        post.reverse();
+        post
+    }
+
+    /// The blocks in the order `write` gives them, and per block the
+    /// (predecessor, loop header) of an empty latch folded into its
+    /// predecessor.
+    ///
+    /// Blocks are laid out in reverse postorder, so every block follows its
+    /// forward predecessors (drivers take a branch to an earlier block for a
+    /// loop's back edge). An empty latch (only a branch back to its loop
+    /// header) is folded into its one predecessor, so the exiting block is
+    /// the latch as in DXC's loops; the AMD driver hangs on divergent loops
+    /// otherwise. A fold never gives a block a second branch back, nor a
+    /// header a second block that branches back to it (see
+    /// [`Module::one_back_edge_each`]): two latches folded into one block
+    /// that leaves two loops at once made vkd3d-proton's DXIL converter
+    /// recurse without end.
+    fn layout(&self) -> (Vec<usize>, Vec<Option<(usize, usize)>>) {
+        let succs = |b: usize| successors(self.blocks[b].term);
+        // Phis nothing reads do not keep a latch from folding (cool_fox dc155d2).
+        let live = self.live();
+        let post = self.reverse_postorder();
+        let mut pos = vec![u64::MAX; self.blocks.len()];
+        for (n, &b) in post.iter().enumerate() {
+            pos[b] = n as u64;
+        }
+        let mut preds = vec![Vec::new(); self.blocks.len()];
+        // Per header: the blocks that branch back to it (once per edge).
+        let mut latches = vec![0u32; self.blocks.len()];
+        for &b in &post {
+            for &s in succs(b).iter() {
+                preds[s].push(b);
+                if pos[s] <= pos[b] {
+                    latches[s] += 1;
+                }
+            }
+        }
+        let goes_back = |b: usize| succs(b).iter().any(|&s| pos[s] <= pos[b]);
+        let mut fold: Vec<Option<(usize, usize)>> = vec![None; self.blocks.len()];
+        // Per predecessor: the latch folded into it.
+        let mut into: Vec<Option<usize>> = vec![None; self.blocks.len()];
+        for &b in &post {
+            let blk = &self.blocks[b];
+            if let (Some(Term::Br(h)), true, [p]) = (
+                blk.term,
+                blk.phis.iter().all(|&i| !live[i as usize]) && blk.body.is_empty(),
+                &preds[b][..],
+            ) && pos[h] < pos[b]
+                && !succs(*p).contains(&h)
+                && latches[h] == 1
+                && !goes_back(*p)
+            {
+                // Of two latches below one block, the inner loop's (the
+                // later header) is folded.
+                match into[*p] {
+                    Some(other) if fold[other].is_some_and(|(_, oh)| pos[oh] >= pos[h]) => continue,
+                    Some(other) => fold[other] = None,
+                    None => {}
+                }
+                into[*p] = Some(b);
+                fold[b] = Some((*p, h));
+            }
+        }
+        let layout: Vec<usize> = post.into_iter().filter(|&b| fold[b].is_none()).collect();
+        (layout, fold)
+    }
+
+    /// Gives every loop header one block that branches back to it, and every
+    /// block at most one branch back to a loop header, as DXC's loops have
+    /// them: a block that branches back to several headers (a latch of an
+    /// inner and an outer loop at once) keeps the branch to the innermost
+    /// header and reaches each other one through a new block, and the
+    /// latches of a header with several branch to one new latch, which
+    /// takes the header's joins from them. The program does the same.
+    ///
+    /// vkd3d-proton's DXIL converter (dxil-spirv) assumes one back edge per
+    /// block and per header in the passes it runs before its structurizer
+    /// (after a subgroup shuffle such as `WaveReadLaneAt`): with two, its
+    /// dominator recomputation recursed until the stack overflowed and the
+    /// pipeline was never made.
+    pub(crate) fn one_back_edge_each(&mut self) {
+        // A branch to `from` goes to `to` instead.
+        fn retarget(m: &mut Module, b: usize, from: usize, to: usize) {
+            let swap = |t: usize| if t == from { to } else { t };
+            m.blocks[b].term = match m.blocks[b].term {
+                Some(Term::Br(t)) => Some(Term::Br(swap(t))),
+                Some(Term::CondBr(c, t, f)) => Some(Term::CondBr(c, swap(t), swap(f))),
+                t => t,
+            };
+        }
+        let back = |m: &Module, pos: &[usize], b: usize| -> Vec<usize> {
+            let mut hs: Vec<usize> = successors(m.blocks[b].term)
+                .iter()
+                .copied()
+                .filter(|&s| pos[s] <= pos[b])
+                .collect();
+            hs.dedup();
+            hs
+        };
+        let positions = |m: &Module| {
+            let order = m.reverse_postorder();
+            let mut pos = vec![usize::MAX; m.blocks.len()];
+            for (k, &b) in order.iter().enumerate() {
+                pos[b] = k;
+            }
+            (order, pos)
+        };
+        // A block with several branches back.
+        let (order, pos) = positions(self);
+        for &b in &order {
+            let mut hs = back(self, &pos, b);
+            if hs.len() < 2 {
+                continue;
+            }
+            hs.sort_by_key(|&h| pos[h]);
+            hs.pop();
+            for h in hs {
+                let c = self.new_block();
+                self.terminate(c, Term::Br(h));
+                retarget(self, b, h, c);
+                for k in 0..self.blocks[h].phis.len() {
+                    let p = self.blocks[h].phis[k] as usize;
+                    if let Op::Phi(incoming) = &mut self.insts[p].op {
+                        for x in incoming.iter_mut().filter(|x| x.1 == b) {
+                            x.1 = c;
+                        }
+                    }
+                }
+            }
+        }
+        // A header with several latches.
+        let (order, pos) = positions(self);
+        let mut latches: Vec<Vec<usize>> = vec![Vec::new(); self.blocks.len()];
+        for &b in &order {
+            for h in back(self, &pos, b) {
+                latches[h].push(b);
+            }
+        }
+        for (h, ls) in latches.into_iter().enumerate() {
+            if ls.len() < 2 {
+                continue;
+            }
+            let c = self.new_block();
+            self.terminate(c, Term::Br(h));
+            for &l in &ls {
+                retarget(self, l, h, c);
+            }
+            for k in 0..self.blocks[h].phis.len() {
+                let p = self.blocks[h].phis[k];
+                let Op::Phi(incoming) =
+                    std::mem::replace(&mut self.insts[p as usize].op, Op::Phi(Vec::new()))
+                else {
+                    unreachable!("a join")
+                };
+                let (round, rest): (Vec<_>, Vec<_>) =
+                    incoming.into_iter().partition(|x| ls.contains(&x.1));
+                let v = match round.first() {
+                    Some(&(v, _)) if round.iter().all(|x| x.0 == v) => v,
+                    _ => {
+                        let ty = self.insts[p as usize].ty;
+                        let q = self.phi(c, ty);
+                        self.set_phi(q, round);
+                        q
+                    }
+                };
+                let mut incoming = rest;
+                incoming.push((v, c));
+                self.insts[p as usize].op = Op::Phi(incoming);
+            }
+        }
+    }
+
     /// The module as bitcode.
     /// Which instructions are written: every body instruction, the branch
     /// conditions, and whatever they read, transitively (a phi nothing reads
@@ -685,57 +881,7 @@ impl Module {
         // Phis nothing reads are left out (one register per phi makes many).
         let live = self.live();
 
-        // Blocks are laid out in reverse postorder, so every block follows
-        // its forward predecessors (drivers take a branch to an earlier
-        // block for a loop's back edge).
-        let succs = |b: usize| successors(self.blocks[b].term);
-        let mut seen = vec![false; self.blocks.len()];
-        let mut post = Vec::new();
-        let mut stack = vec![(0usize, 0usize)];
-        seen[0] = true;
-        while let Some(top) = stack.last_mut() {
-            let (b, k) = *top;
-            top.1 += 1;
-            match succs(b).get(k) {
-                Some(&s) if !seen[s] => {
-                    seen[s] = true;
-                    stack.push((s, 0));
-                }
-                Some(_) => {}
-                None => {
-                    post.push(b);
-                    stack.pop();
-                }
-            }
-        }
-        post.reverse();
-        let mut pos = vec![u64::MAX; self.blocks.len()];
-        for (n, &b) in post.iter().enumerate() {
-            pos[b] = n as u64;
-        }
-        // An empty latch (only a branch back to its loop header) is folded
-        // into its one predecessor, so the exiting block is the latch as in
-        // DXC's loops; the AMD driver hangs on divergent loops otherwise.
-        let mut preds = vec![Vec::new(); self.blocks.len()];
-        for &b in &post {
-            for &s in succs(b).iter() {
-                preds[s].push(b);
-            }
-        }
-        let mut fold = vec![None; self.blocks.len()];
-        for &b in &post {
-            let blk = &self.blocks[b];
-            if let (Some(Term::Br(h)), true, [p]) = (
-                blk.term,
-                blk.phis.iter().all(|&i| !live[i as usize]) && blk.body.is_empty(),
-                &preds[b][..],
-            ) && pos[h] < pos[b]
-                && !succs(*p).contains(&h)
-            {
-                fold[b] = Some((*p, h));
-            }
-        }
-        let layout: Vec<usize> = post.into_iter().filter(|&b| fold[b].is_none()).collect();
+        let (layout, fold) = self.layout();
         let mut pos = vec![u64::MAX; self.blocks.len()];
         for (n, &b) in layout.iter().enumerate() {
             pos[b] = n as u64;

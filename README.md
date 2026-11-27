@@ -66,6 +66,11 @@ scripts\play.ps1 -Exe <path of your copy's executable>
 `scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
 something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
 
+`play.ps1` also enables the ambient air and reflection stand-in
+(`VICTORY_AMBIENT_AIR=1.5`, `VICTORY_AMBIENT_SPECULAR=1`) that fixes the
+purple/odd shading on cards where the title's rays find nothing. The tuned
+1280x720 profile is `scripts\play-22fps.ps1 -Game <path of your executable>`.
+
 Before the first run, ahead of time (both can be stopped and go on later):
 
 ```powershell

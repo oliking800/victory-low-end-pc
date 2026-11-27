@@ -32,6 +32,48 @@ Jump to: [Results](#results) · [Linux](#how-to-reproduce-on-linux) · [Windows]
 - One machine, a handful of runs: the ~100 ms figure comes from **five clean
   runs** of 4 to 8 minutes of scene each.
 
+## Easy mode (Windows)
+
+One config file, one command. No `VICTORY_*` variables to understand unless
+you want to.
+
+1. Build once: `.\scripts\build.ps1`
+2. Copy the example and set `GAME`:
+   ```powershell
+   copy victory-easy.env.example victory-easy.env
+   notepad victory-easy.env
+   ```
+3. Double-click `victory-easy.cmd` (or run it from PowerShell).
+
+The launcher detects the GPU's VRAM and system RAM, picks a profile
+automatically, applies the title's `sharp` settings profile, checks the
+D3D12 Agility SDK pieces, and starts the title.
+
+| Setting | What it means |
+|---|---|
+| `PROFILE` | `auto`, `performance` (≤6 GB), `balanced` (6–12 GB) or `quality` (≥12 GB) |
+| `GAME` | your own copy's `game_scarlett_master.exe` |
+| `RESOLUTION` | output size; profile default is `1280x720` (balanced) or `1920x1080` (quality) |
+| `RENDER_SCALE` | `0.5` = faster/softer, `1.0` = sharpest; balanced uses `0.667` |
+| `QUALITY` | title's own settings: `sharp`, `balanced`, `maxfps`, or `off` |
+| `CONSOLE` | `series-s` (default) or `series-x` |
+| `PANEL` | `1` shows the overlay, `0` keeps it off |
+| `SKIP_INTRO` | `1` passes the title's `-skipToIIS` switch (for testing) |
+| `AUTO_ENTER` | `1` holds Enter through the menus (for testing) |
+
+Any `VICTORY_*` line in `victory-easy.env` overrides the chosen profile, so
+the easy file is still the place for advanced tweaks. Useful commands:
+
+```powershell
+python tools\victory_easy.py --dry-run      # show the plan, start nothing
+python tools\victory_easy.py --show-env     # print the resulting VICTORY_* values
+python tools\victory_easy.py --init         # create victory-easy.env
+```
+
+`victory-easy.env` is git-ignored; `victory-easy.env.example` is the
+template. On Linux, use `scripts/settings-perf.env` with `scripts/run.sh`;
+the easy launcher is Windows-first (it reads `nvidia-smi`).
+
 ## Results
 
 First playable scene, console profile "Series S". Frame time = the median of

@@ -131,3 +131,16 @@ Profiles are `maxfps` (640x480 + heavy quality cuts), `balanced`, and
 `sharp` (keeps RT/grass/SSR/motion-blur off but restores texture LOD, mip
 bias and anisotropic filtering). The game may rewrite its settings on exit;
 apply profiles while `victory.exe` is not running.
+
+## Easy launcher
+
+`victory_easy.py` (and `victory-easy.cmd` at the repo root) is the
+one-file, one-command entry point: it reads `victory-easy.env`, detects VRAM
+and RAM, picks a profile, applies the title's sharp settings, and launches.
+See the "Easy mode (Windows)" section of the main README.
+
+```powershell
+python tools\victory_easy.py --init
+python tools\victory_easy.py --dry-run
+python tools\victory_easy.py --show-env
+```

@@ -81,3 +81,6 @@ __pycache__/
 
 # Local benchmark output (logs, summaries, run settings)
 bench/
+
+# Per-user easy-launcher config
+victory-easy.env

@@ -241,6 +241,17 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--console", default="series-s")
+    parser.add_argument(
+        "--title-arg",
+        action="append",
+        default=[],
+        help="argument passed to the title after -- (repeatable), e.g. -skipToIIS",
+    )
+    parser.add_argument(
+        "--no-keys",
+        action="store_true",
+        help="do not auto-press Enter (for testing -skipToIIS on its own)",
+    )
     args = parser.parse_args(argv)
     if not args.game:
         parser.error("--game or VICTORY_GAME must name the title executable")
@@ -258,6 +269,8 @@ def main(argv=None) -> int:
         else:
             settings[key] = value
     settings.setdefault("VICTORY_KEYS", keys_pattern())
+    if args.no_keys:
+        settings.pop("VICTORY_KEYS", None)
     env.update(settings)
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -275,6 +288,8 @@ def main(argv=None) -> int:
         args.console,
         "--execute",
     ]
+    if args.title_arg:
+        cmd.extend(["--", *args.title_arg])
     (run_dir / "command.txt").write_text(" ".join(cmd) + "\n", encoding="utf-8")
 
     print(f"run       {run_dir}")
@@ -337,6 +352,7 @@ def main(argv=None) -> int:
             "killed": killed,
             "exit_code": exit_code,
             "settings": settings,
+            "title_args": args.title_arg,
         }
     )
     (run_dir / "summary.json").write_text(

@@ -415,6 +415,29 @@ fork; older trees ignore those variables and still use the rest of the
 profile. Run `python tools\tweak_game_settings.py --restore` to undo the
 game-side profile.
 
+### Current full-shader base (November 2026)
+
+The `fix/revert-lowspec-build` base keeps the full shader tree (PR #3's
+low-spec renderer is reverted). On the RTX 4060 at 1280x720 it measured
+**18.2 fps median (54.9 ms), 57.8 ms p90**, first world in 42 s, with no
+exceptions or device removal. This build ignores `VICTORY_RENDER_SCALE`; the
+image is rendered at the window's native resolution, not upscaled.
+
+Visual fixes now on by default:
+
+- `VICTORY_SKIP_PIPELINES=02384a60fda6f2d0,731a39171b568298` drops the
+  water/heat-haze and decal-heap pipelines that otherwise draw broken or
+  black patches.
+- Pipelines with static samplers are compiled each run instead of loaded from
+  the pipeline library: a loaded pipeline can keep the previous process's
+  sampler-table indices, which shows as posterized light with green/magenta
+  fringes or black patches. `VICTORY_LIBRARY_STATIC_SAMPLERS=1` restores the
+  old library loading.
+- `VICTORY_AMBIENT=1.0` uses the full indirect-light estimate instead of 80%
+  of it, lifting crushed shadows where the title's ray-traced light is off.
+- `VICTORY_WAVE_LOCAL=idiom` is no longer set: it refused the half-wave
+  fallback and dropped 11 more shaders on RTX.
+
 ### Windows OOM mitigation (now the default in `launch.ps1`)
 
 A Windows run hit `0x8007000E` OOM ("no host list for a state prelude") with
@@ -429,7 +452,7 @@ following overrides reduce commit pressure and are now set automatically by
 | `VICTORY_LEVELS_ON_DEMAND` | `1` | Textures made level by level on demand |
 | `VICTORY_RAW_VIEWS` | `0` | Raw views off |
 | `VICTORY_GROUP_SYNC` | `2` | Group sync level |
-| `VICTORY_WAVE_LOCAL` | `idiom` | Wave local mode |
+| `VICTORY_WAVE_LOCAL` | *(unset)* | Leave unset; `idiom` refuses half-wave fallbacks and drops shaders on RTX (black or missing effects) |
 | `VICTORY_WAVE_WIDE` | `` (empty) | Wave wide mode off |
 | `VICTORY_PIPELINE_BOOK` | `1` | Pipeline book enabled |
 | `VICTORY_STAGING_KEPT` | `4` | Idle staging blocks kept (default 8; frees ~256 MiB commit) |

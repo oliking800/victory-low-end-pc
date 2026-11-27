@@ -47,7 +47,7 @@ $settings = [ordered]@{
     VICTORY_CARD_ACCOUNTING     = '0'
     VICTORY_PIPELINE_BOOK       = '0'
     VICTORY_MEMORY_MAP          = '0'
-    VICTORY_AMBIENT             = '0.8'
+    VICTORY_AMBIENT             = '1.0'
     VICTORY_AMBIENT_AIR         = '1.5'
     VICTORY_CARD_AWAKE          = '1'
     VICTORY_CARD_REHASH_RUNS    = '1'
@@ -61,7 +61,7 @@ $settings = [ordered]@{
     VICTORY_WIDE_BACK           = '1'
     VICTORY_RAW_VIEWS           = '0'
     VICTORY_GROUP_SYNC          = '2'
-    VICTORY_WAVE_LOCAL          = 'idiom'
+    VICTORY_SKIP_PIPELINES      = '02384a60fda6f2d0,731a39171b568298'
     VICTORY_LOG                 = $Log
 }
 if (-not (Test-Path $Exe))  { Write-Host "No $Exe. Build it first (README.md, Windows)."; exit 2 }
